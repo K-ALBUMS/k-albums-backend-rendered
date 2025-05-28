@@ -2,14 +2,13 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from PyPDF2 import PdfReader
 import io
-import re # <--- AJOUT: Pour les expressions régulières (recherche de texte)
+import re
 
 app = Flask(__name__)
 CORS(app)
 
 @app.route('/')
 def home():
-    # ... (code inchangé ici) ...
     return jsonify({
         "message": "Bienvenue sur le backend K-Albums!", 
         "status": "en fonctionnement",
@@ -18,25 +17,12 @@ def home():
 
 @app.route('/api/test')
 def api_test():
-    # ... (code inchangé ici) ...
     return jsonify({"message": "Réponse de test de l'API du backend!"})
 
-@app.route('/api/receive-filename', methods=['POST'])
-def receive_filename():
-    # ... (code inchangé ici, on le garde pour l'instant) ...
-    try:
-        data = request.get_json() 
-        if not data or 'filename' not in data:
-            return jsonify({"error": "Nom de fichier manquant dans la requête"}), 400
-        filename = data['filename']
-        print(f"Nom de fichier reçu (ancienne route) : {filename}") 
-        return jsonify({
-            "message": "Nom de fichier bien reçu par le backend (ancienne route)!",
-            "filename_received": filename
-        })
-    except Exception as e:
-        print(f"Erreur lors du traitement de receive_filename: {e}")
-        return jsonify({"error": "Erreur interne du serveur"}), 500
+# On peut commenter ou supprimer cette ancienne route si elle n'est plus utile
+# @app.route('/api/receive-filename', methods=['POST'])
+# def receive_filename():
+#     # ... (code de l'ancienne route)
 
 @app.route('/api/upload-invoice', methods=['POST'])
 def upload_invoice():
@@ -55,45 +41,59 @@ def upload_invoice():
             reader = PdfReader(file_content_in_memory)
             
             full_text = ""
-            # --- MODIFICATION : Extraire le texte de toutes les pages ---
             for page_num in range(len(reader.pages)):
                 page = reader.pages[page_num]
                 page_text = page.extract_text()
                 if page_text:
-                    full_text += page_text + "\n" # Ajoute le texte de la page et un saut de ligne
+                    full_text += page_text + "\n" 
             
             if not full_text.strip():
                 full_text = "[PyPDF2 n'a pas pu extraire de texte. Le PDF est peut-être une image ou vide.]"
 
-            # --- AJOUT : Recherche des frais de port et frais bancaires ---
             shipping_cost = None
             bank_fee = None
+            product_lines_snippet = None # <--- NOUVEAU : Pour l'extrait des lignes produits
 
-            # Expression régulière pour trouver "Shipping" suivi d'un montant en dollars
-            # Ex: "Shipping $123.45" ou "Shipping                   $  123.45"
-            # \s* signifie "zéro ou plusieurs espaces"
-            # \$? signifie "un dollar optionnel" (pour être flexible)
-            # (\d+\.?\d*) signifie "un ou plusieurs chiffres, suivis optionnellement d'un point et d'autres chiffres"
+            # Recherche des frais (comme avant)
             shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
             if shipping_match:
-                shipping_cost = shipping_match.group(1) # Le groupe 1 est la valeur capturée (le montant)
+                shipping_cost = shipping_match.group(1)
                 print(f"Frais de port trouvés: {shipping_cost}")
 
-            # Expression régulière pour "Bank transfer fee"
             bank_fee_match = re.search(r"Bank transfer fee\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
             if bank_fee_match:
                 bank_fee = bank_fee_match.group(1)
                 print(f"Frais bancaires trouvés: {bank_fee}")
+
+            # --- AJOUT : Tentative d'extraction des premières lignes de produits ---
+            # On cherche l'en-tête du tableau des produits. 
+            # Il faudra peut-être ajuster cette recherche en fonction de la variabilité du texte.
+            # On cherche une ligne qui contient "Product", "Quantity", "Price", "Total" dans cet ordre, 
+            # avec potentiellement des espaces variables entre eux.
+            # Ceci est une regex simple, elle pourrait avoir besoin d'être affinée.
+            product_table_header_match = re.search(r"Product\s+Quantity\s+Price\s+Total", full_text, re.IGNORECASE)
+            
+            if product_table_header_match:
+                print("En-tête du tableau des produits trouvé.")
+                # Prend le texte APRÈS l'en-tête trouvé
+                text_after_header = full_text[product_table_header_match.end():]
+                # Sépare ce texte en lignes et prend les premières (par exemple, 5 lignes)
+                lines_after_header = text_after_header.strip().split('\n')
+                # On prend jusqu'à 5 lignes pour l'extrait, ou moins s'il y en a moins.
+                num_lines_to_extract = min(len(lines_after_header), 10) # Prenons 10 lignes pour voir un peu plus
+                product_lines_snippet = "\n".join(lines_after_header[:num_lines_to_extract])
+                print(f"Extrait des lignes de produits:\n{product_lines_snippet}")
+            else:
+                print("En-tête du tableau des produits NON trouvé.")
             # --- FIN AJOUT ---
 
-            print(f"Texte complet extrait (premiers 500 caractères): {full_text[:500]}")
-
             return jsonify({
-                "message": "Fichier PDF reçu et tentative d'extraction de texte et de frais effectuée.",
+                "message": "Fichier PDF reçu, tentative d'extraction de texte, frais et début de table produits effectuée.",
                 "filename": file.filename,
-                "extracted_full_text_snippet": full_text[:1000], # On renvoie un extrait du texte complet
-                "shipping_cost_usd": shipping_cost, # Peut être None s'il n'est pas trouvé
-                "bank_transfer_fee_usd": bank_fee # Peut être None s'il n'est pas trouvé
+                "extracted_full_text_snippet": full_text[:200], # On peut réduire la taille de ce snippet général
+                "shipping_cost_usd": shipping_cost,
+                "bank_transfer_fee_usd": bank_fee,
+                "product_lines_snippet": product_lines_snippet # <--- NOUVEAU : On renvoie l'extrait
             })
 
         except Exception as e:
