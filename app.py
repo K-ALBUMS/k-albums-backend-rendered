@@ -7,6 +7,7 @@ import re
 app = Flask(__name__)
 CORS(app)
 
+# ... (les routes '/' et '/api/test' restent inchangées) ...
 @app.route('/')
 def home():
     return jsonify({
@@ -19,10 +20,6 @@ def home():
 def api_test():
     return jsonify({"message": "Réponse de test de l'API du backend!"})
 
-# On peut commenter ou supprimer cette ancienne route si elle n'est plus utile
-# @app.route('/api/receive-filename', methods=['POST'])
-# def receive_filename():
-#     # ... (code de l'ancienne route)
 
 @app.route('/api/upload-invoice', methods=['POST'])
 def upload_invoice():
@@ -52,9 +49,9 @@ def upload_invoice():
 
             shipping_cost = None
             bank_fee = None
-            product_lines_snippet = None # <--- NOUVEAU : Pour l'extrait des lignes produits
+            # --- MODIFICATION : On va stocker les produits dans une liste ---
+            parsed_products = [] 
 
-            # Recherche des frais (comme avant)
             shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
             if shipping_match:
                 shipping_cost = shipping_match.group(1)
@@ -65,35 +62,58 @@ def upload_invoice():
                 bank_fee = bank_fee_match.group(1)
                 print(f"Frais bancaires trouvés: {bank_fee}")
 
-            # --- AJOUT : Tentative d'extraction des premières lignes de produits ---
-            # On cherche l'en-tête du tableau des produits. 
-            # Il faudra peut-être ajuster cette recherche en fonction de la variabilité du texte.
-            # On cherche une ligne qui contient "Product", "Quantity", "Price", "Total" dans cet ordre, 
-            # avec potentiellement des espaces variables entre eux.
-            # Ceci est une regex simple, elle pourrait avoir besoin d'être affinée.
-            product_table_header_match = re.search(r"Product\s+Quantity\s+Price\s+Total", full_text, re.IGNORECASE)
+            # --- DÉBUT DE LA NOUVELLE LOGIQUE DE PARSING DES LIGNES PRODUITS ---
+            # On divise le texte complet en lignes pour l'analyser ligne par ligne
+            lines = full_text.split('\n')
+            product_name_buffer = [] # Pour gérer les noms de produits sur plusieurs lignes (amélioration future)
+
+            for i, line in enumerate(lines):
+                # Regex pour trouver la ligne avec Release Date, Quantité, Prix, Total
+                # Ex: Release : 2024-12-093 $14.41 $43.23
+                # Groupes : (Date) (Quantité) (PrixUnitaire) (PrixTotalLigne)
+                match = re.match(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)", line.strip())
+
+                if match:
+                    # Si on trouve une ligne de "Release...", la ligne précédente (ou les précédentes) est le nom du produit
+                    if i > 0: # S'assurer qu'il y a une ligne précédente
+                        # Pour cette première version simple, on prend juste la ligne d'avant comme nom
+                        # Amélioration future: gérer les noms sur plusieurs lignes en utilisant product_name_buffer
+                        product_name = lines[i-1].strip() 
+                        
+                        release_date = match.group(1)
+                        quantity = match.group(2)
+                        unit_price = match.group(3)
+                        # line_total = match.group(4) # On a aussi le total de la ligne si besoin
+
+                        parsed_products.append({
+                            "name": product_name,
+                            "quantity": int(quantity),
+                            "unit_price_usd": float(unit_price),
+                            "release_date": release_date
+                            # "line_total_usd": float(line_total) # Optionnel
+                        })
+                        print(f"Produit trouvé: {product_name}, Qté: {quantity}, Prix: {unit_price}")
+                        product_name_buffer = [] # Réinitialiser le buffer pour le prochain produit
+                    else:
+                        print(f"Ligne 'Release' trouvée sans nom de produit précédent: {line}")
+                # else:
+                    # Si la ligne ne correspond pas à "Release...", elle pourrait faire partie d'un nom de produit.
+                    # On pourrait l'ajouter à product_name_buffer ici pour une gestion plus avancée
+                    # des noms multi-lignes. Pour l'instant, on garde simple.
+                    # if line.strip(): # Si la ligne n'est pas vide
+                    #    product_name_buffer.append(line.strip())
             
-            if product_table_header_match:
-                print("En-tête du tableau des produits trouvé.")
-                # Prend le texte APRÈS l'en-tête trouvé
-                text_after_header = full_text[product_table_header_match.end():]
-                # Sépare ce texte en lignes et prend les premières (par exemple, 5 lignes)
-                lines_after_header = text_after_header.strip().split('\n')
-                # On prend jusqu'à 5 lignes pour l'extrait, ou moins s'il y en a moins.
-                num_lines_to_extract = min(len(lines_after_header), 10) # Prenons 10 lignes pour voir un peu plus
-                product_lines_snippet = "\n".join(lines_after_header[:num_lines_to_extract])
-                print(f"Extrait des lignes de produits:\n{product_lines_snippet}")
-            else:
-                print("En-tête du tableau des produits NON trouvé.")
-            # --- FIN AJOUT ---
+            if not parsed_products:
+                print("Aucun produit n'a pu être parsé avec la logique actuelle.")
+            # --- FIN DE LA NOUVELLE LOGIQUE DE PARSING ---
 
             return jsonify({
-                "message": "Fichier PDF reçu, tentative d'extraction de texte, frais et début de table produits effectuée.",
+                "message": "Tentative d'extraction des produits, frais de port et frais bancaires.",
                 "filename": file.filename,
-                "extracted_full_text_snippet": full_text[:200], # On peut réduire la taille de ce snippet général
                 "shipping_cost_usd": shipping_cost,
                 "bank_transfer_fee_usd": bank_fee,
-                "product_lines_snippet": product_lines_snippet # <--- NOUVEAU : On renvoie l'extrait
+                "parsed_products": parsed_products, # <--- NOUVEAU : On renvoie la liste des produits
+                "extracted_full_text_snippet": full_text[:200] # Gardons un petit extrait pour débogage
             })
 
         except Exception as e:
