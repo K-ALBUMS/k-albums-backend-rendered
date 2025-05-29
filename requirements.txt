@@ -2,3 +2,5 @@ Flask
 gunicorn
 Flask-CORS
 PyPDF2
+requests
+beautifulsoup4
