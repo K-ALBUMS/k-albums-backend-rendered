@@ -47,7 +47,7 @@ def upload_invoice():
                 full_text = "[PyPDF2 n'a pas pu extraire de texte. Le PDF est peut-être une image ou vide.]"
                 print("Avertissement: Texte du PDF vide ou non extractible.")
 
-            print("--- TEXTE COMPLET EXTRAIT DU PDF (Backend V6.1) ---")
+            print("--- TEXTE COMPLET EXTRAIT DU PDF (Backend V6.1 - Vérification) ---")
             print(full_text[:3000]) 
             print("--- FIN TEXTE COMPLET EXTRAIT (Snippet) ---")
 
@@ -63,8 +63,7 @@ def upload_invoice():
             release_line_pattern_re = re.compile(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)")
             release_line_date_only_or_empty_re = re.compile(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})?\s*$")
             alt_info_pattern_re = re.compile(r"^(?:Size|Ver|Version|Type)\s*:\s*(.*?)\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)", re.IGNORECASE)
-            # Assure-toi que cette ligne est bien là et correctement indentée :
-            simple_qty_price_pattern_re = re.compile(r"^\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)\s*$")
+            simple_qty_price_pattern_re = re.compile(r"^\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)\s*$") # Définition cruciale
 
             i = 0
             while i < len(lines):
@@ -99,39 +98,46 @@ def upload_invoice():
                     i+=1
                     continue
 
-                current_product_name = ""
+                current_product_name = "" # Initialisation pour chaque tentative de produit
                 release_date_val = "N/A"
                 quantity_val = None
                 unit_price_val = None
                 lines_processed_for_item = 0
                 
-                # Accumuler le nom du produit si la ligne n'est pas une ligne "Release"
-                # et qu'elle n'est pas vide
+                # Accumuler le nom du produit si la ligne n'est pas une ligne "Release" et qu'elle n'est pas vide
+                # On le fait ici pour que le buffer soit à jour avant de tester les conditions "Release"
                 if line_stripped and not line_stripped.lower().startswith("release :"):
                      product_name_buffer.append(line_stripped)
                 
-                # Essayer de matcher une ligne de données produit
-                # Cas 1: Ligne "Release : DATE Q P T" (le nom est dans le buffer)
+                # Tentative de détection de la fin d'un item produit
+                # Cas 1: La ligne actuelle est "Release : DATE Q P T"
                 match_release_standard = release_line_pattern_re.match(line_stripped)
-                if match_release_standard and product_name_buffer:
-                    # On a le nom dans le buffer (qui ne contient PAS la ligne "Release...")
-                    # et la ligne actuelle contient toutes les infos Q,P,T
-                    product_name_candidate = " ".join(product_name_buffer[:-1]).strip() # Exclure la ligne "Release..." du nom si elle a été bufferisée par erreur
-                    if not product_name_candidate and len(product_name_buffer) > 0 : # Si le buffer ne contenait que la ligne "Release" (improbable)
-                         product_name_candidate = product_name_buffer[0]
-
+                if match_release_standard: # Si la ligne actuelle contient QPT
+                    # Le nom du produit est dans le buffer accumulé JUSTE AVANT cette ligne "Release".
+                    # Donc, on retire la ligne "Release..." elle-même du buffer si elle y a été mise par erreur.
+                    temp_name_buffer = [l for l in product_name_buffer if not release_line_pattern_re.match(l.strip())]
+                    if not temp_name_buffer and product_name_buffer: # Si le buffer ne contenait QUE la ligne Release (improbable mais sécurité)
+                        # Cela signifie que le nom était sur la même ligne que "Release" ou manquant.
+                        # On essaie de prendre ce qui est avant "Release :" sur la ligne actuelle.
+                         name_parts = line_stripped.split("Release :")
+                         if len(name_parts) > 1 and name_parts[0].strip():
+                             product_name_candidate = name_parts[0].strip()
+                         else: # Pas de nom clair
+                             product_name_candidate = "Produit Inconnu (Cas 1 Erreur Nom)"
+                    else:
+                        product_name_candidate = " ".join(temp_name_buffer).strip()
 
                     release_date_val = match_release_standard.group(1)
                     quantity_val = match_release_standard.group(2)
                     unit_price_val = match_release_standard.group(3)
-                    print(f"DEBUG_PARSING: Cas 1 (Nom puis Release QPT) - Nom Buffer: '{' // '.join(product_name_buffer)}', Ligne Release: '{line_stripped}'")
+                    print(f"DEBUG_PARSING: Cas 1 (Ligne Release avec QPT) - Nom Buffer: '{product_name_candidate}', Ligne: '{line_stripped}'")
                     lines_processed_for_item = 1 
                 
                 # Cas 2: Ligne actuelle est "Release : [DATE/vide]", et la SUIVANTE contient les données
                 elif release_line_date_only_or_empty_re.match(line_stripped) and (i + 1 < len(lines)):
                     potential_data_line = lines[i+1].strip()
                     match_alt_data = alt_info_pattern_re.match(potential_data_line)
-                    match_simple_data = simple_qty_price_pattern_re.match(potential_data_line)
+                    match_simple_data = simple_qty_price_pattern_re.match(potential_data_line) # Utilisation de la variable
 
                     if match_alt_data or match_simple_data:
                         product_name_candidate = " ".join(product_name_buffer).strip()
@@ -163,20 +169,23 @@ def upload_invoice():
                             "unit_price_usd": float(unit_price_val), "release_date": release_date_val
                         })
                         print(f"  ==> PRODUIT AJOUTÉ: {final_name} (Qté: {quantity_val}, Prix: ${unit_price_val}, Date: {release_date_val})")
-                        product_name_buffer = [] 
-                        i += lines_processed_for_item 
-                        continue 
                     else:
-                        print(f"DEBUG_PARSING: Nom vide APRES nettoyage. Lignes approx: '{line_stripped}'" + (f" et '{lines[i+1].strip()}'" if lines_processed_for_item==2 else ""))
-                        product_name_buffer = [] 
-                        i += lines_processed_for_item if lines_processed_for_item > 0 else 1
-                        continue
+                         print(f"DEBUG_PARSING: Nom de produit vide APRES nettoyage final. Lignes approx: '{line_stripped}'" + (f" et '{lines[i+1].strip()}'" if lines_processed_for_item==2 else ""))
+                    
+                    product_name_buffer = [] 
+                    i += lines_processed_for_item 
+                    continue 
                 
-                # Si on n'a pas finalisé de produit, on avance et la ligne actuelle reste dans le buffer (si elle y a été mise)
-                if not line_stripped and not product_name_buffer : # Si ligne vide et buffer vide, on ne fait rien
-                    pass
-                elif not line_stripped and product_name_buffer: # Ligne vide après avoir accumulé des lignes pour un nom
+                # Si on n'a pas finalisé de produit, on avance.
+                # Le product_name_buffer continue d'accumuler si la ligne n'était pas "Release :" et n'était pas vide.
+                # Si la ligne était "Release :" mais n'a pas mené à un produit, le buffer est vidé juste avant ou
+                # si la ligne était vide après un buffer plein, le buffer est conservé pour le tour suivant.
+                if not line_stripped and not product_name_buffer: # Si ligne vide et buffer vide, on ne fait rien pour le buffer
+                    pass 
+                elif not line_stripped and product_name_buffer: 
                     print(f"DEBUG_PARSING: Ligne vide après buffer: {' // '.join(product_name_buffer)}. Buffer conservé.")
+                # Si la ligne n'est pas vide et n'est pas "Release :", elle a déjà été ajoutée au buffer plus haut.
+                # Si la ligne est "Release :" et n'a pas abouti, le buffer a été vidé (ou elle n'a pas été ajoutée).
 
                 i += 1
             
@@ -208,22 +217,16 @@ def upload_invoice():
     
     return jsonify({"error": "Un problème est survenu avec le fichier ou fichier non traité."}), 500
 
-
 @app.route('/api/get-website-price', methods=['POST'])
 def get_website_price():
+    # ... (Code de cette fonction reste identique à la version précédente que je t'ai donnée) ...
     data = request.get_json()
     product_name_from_invoice = data.get('productName')
     product_url_on_website = data.get('productUrl') 
-
     print(f"DEBUG /api/get-website-price: Reçu productName='{product_name_from_invoice}', productUrl='{product_url_on_website}'")
-
     if not product_url_on_website and not product_name_from_invoice: 
         return jsonify({"error": "Nom du produit ou URL du produit manquant."}), 400
-
-    price_str = None
-    debug_messages = []
-    target_url = None 
-
+    price_str = None; debug_messages = []; target_url = None 
     if product_url_on_website:
         target_url = product_url_on_website
         debug_messages.append(f"Utilisation de l'URL fournie: {target_url}")
@@ -244,22 +247,17 @@ def get_website_price():
             search_terms = re.sub(r"['‘’]", "", search_terms).strip() 
             search_terms = re.sub(r"[^\w\s-]", "", search_terms).strip() 
             search_terms = re.sub(r"\s+", "+", search_terms.strip())
-            
             if not search_terms:
                  debug_messages.append(f"Nom produit '{product_name_from_invoice}' trop générique après nettoyage.")
                  return jsonify({"product_name_searched": product_name_from_invoice, "url_attempted": "N/A", "price_eur_ht": None, "error_message": "Nom produit trop générique pour recherche.", "debug_messages": debug_messages }), 200
-
             search_url = f"https://www.kalbums.com/search?q={search_terms}"
             debug_messages.append(f"Construction URL de recherche: {search_url}")
-            
             try:
                 headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-                print(f"DEBUG /api/get-website-price: Requête GET vers page de recherche {search_url}")
                 search_response = requests.get(search_url, headers=headers, timeout=15)
                 search_response.raise_for_status()
                 search_soup = BeautifulSoup(search_response.content, 'html.parser')
                 debug_messages.append(f"Page recherche {search_url} OK. Statut: {search_response.status_code}")
-                
                 product_link_element = search_soup.find('a', attrs={'data-hook': 'item-title'})
                 if product_link_element and product_link_element.has_attr('href'):
                     product_page_url = product_link_element['href']
@@ -272,26 +270,20 @@ def get_website_price():
                     debug_messages.append(f"Aucun lien produit (data-hook='item-title') sur page recherche pour '{search_terms}'.")
                     return jsonify({"product_name_searched": product_name_from_invoice, "url_attempted": search_url, "price_eur_ht": None, "error_message": "Aucun produit correspondant trouvé via recherche.", "debug_messages": debug_messages }), 200
             except requests.exceptions.RequestException as e_search:
-                debug_messages.append(f"Erreur lors de la requête vers la page de recherche {search_url}: {str(e_search)}")
+                debug_messages.append(f"Erreur requête vers page recherche {search_url}: {str(e_search)}")
                 return jsonify({"error": f"Erreur com. recherche: {str(e_search)}", "price_eur_ht": None, "debug": debug_messages}), 500
             except Exception as e_search_parse:
                 debug_messages.append(f"Erreur analyse page recherche: {str(e_search_parse)}")
                 return jsonify({"error": f"Erreur analyse recherche: {str(e_search_parse)}", "price_eur_ht": None, "debug": debug_messages}), 500
-
     if not target_url:
         return jsonify({"error": "Impossible de déterminer l'URL à scraper.", "price_eur_ht": None, "debug": debug_messages}), 400
-
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        print(f"DEBUG /api/get-website-price: Requête GET vers page produit finale {target_url}")
         response = requests.get(target_url, headers=headers, timeout=15)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.content, 'html.parser')
         debug_messages.append(f"Page produit {target_url} OK. Statut: {response.status_code}.")
-
         price_element = soup.find('span', attrs={'data-hook': 'formatted-primary-price'})
-        
         if price_element:
             price_text = price_element.get_text(strip=True) 
             debug_messages.append(f"Élément prix trouvé. Texte brut: '{price_text}'")
@@ -305,7 +297,6 @@ def get_website_price():
                 price_str = price_numeric_str 
         else:
             debug_messages.append("Élément prix (data-hook='formatted-primary-price') non trouvé sur page produit.")
-
     except requests.exceptions.Timeout: debug_messages.append(f"Erreur Timeout vers {target_url}")
     except requests.exceptions.HTTPError as http_err: debug_messages.append(f"Erreur HTTP vers {target_url}: {http_err}")
     except requests.exceptions.RequestException as e: debug_messages.append(f"Erreur requête vers {target_url}: {str(e)}")
@@ -313,13 +304,7 @@ def get_website_price():
         debug_messages.append(f"Erreur inattendue scraping page produit: {str(e)}")
         import traceback
         debug_messages.append(traceback.format_exc())
-
-    return jsonify({
-        "product_name_searched": product_name_from_invoice,
-        "url_attempted": target_url,
-        "price_eur_ht": price_str, 
-        "debug_messages": debug_messages
-    })
+    return jsonify({ "product_name_searched": product_name_from_invoice, "url_attempted": target_url, "price_eur_ht": price_str, "debug_messages": debug_messages })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
