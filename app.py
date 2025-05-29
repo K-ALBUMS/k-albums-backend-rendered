@@ -47,7 +47,7 @@ def upload_invoice():
                 full_text = "[PyPDF2 n'a pas pu extraire de texte. Le PDF est peut-être une image ou vide.]"
                 print("Avertissement: Texte du PDF vide ou non extractible.")
 
-            print("--- TEXTE COMPLET EXTRAIT DU PDF (Backend V6.1 - Vérification) ---")
+            print("--- TEXTE COMPLET EXTRAIT DU PDF (Backend V6.2 - Fix UnboundLocalError) ---")
             print(full_text[:3000]) 
             print("--- FIN TEXTE COMPLET EXTRAIT (Snippet) ---")
 
@@ -57,24 +57,31 @@ def upload_invoice():
             
             lines = full_text.split('\n')
             product_name_buffer = []
+            # MODIFICATION : Initialiser product_name_candidate ici pour garantir sa définition
+            product_name_candidate = "" 
             in_product_section = False
 
             header_pattern_re = re.compile(r"^\s*Product\s+Quantity\s+Price\s+Total\s*$", re.IGNORECASE)
             release_line_pattern_re = re.compile(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)")
             release_line_date_only_or_empty_re = re.compile(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})?\s*$")
             alt_info_pattern_re = re.compile(r"^(?:Size|Ver|Version|Type)\s*:\s*(.*?)\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)", re.IGNORECASE)
-            simple_qty_price_pattern_re = re.compile(r"^\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)\s*$") # Définition cruciale
+            simple_qty_price_pattern_re = re.compile(r"^\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)\s*$")
 
             i = 0
             while i < len(lines):
                 line_stripped = lines[i].strip()
                 
+                # Réinitialisation pour chaque nouvelle ligne potentielle de produit (déjà fait au début de la fonction pour la toute première fois)
+                # Mais on le refait ici quand on s'attend à un NOUVEAU produit (après avoir parsé le précédent ou sauté un header)
+                # product_name_candidate = "" # Redondant si initialisé en haut, mais peut aider à clarifier la logique de reset
+
                 is_header_line = header_pattern_re.match(line_stripped)
 
                 if not in_product_section:
                     if is_header_line:
                         in_product_section = True
                         product_name_buffer = [] 
+                        product_name_candidate = "" # Réinitialiser
                         print(f"DEBUG_PARSING: En-tête initial produits: '{line_stripped}'")
                     i += 1
                     continue 
@@ -84,6 +91,7 @@ def upload_invoice():
                     if product_name_buffer:
                          print(f"DEBUG_PARSING: Buffer vidé (en-tête répété). Contenu avant: {' // '.join(product_name_buffer)}")
                     product_name_buffer = []
+                    product_name_candidate = "" # Réinitialiser
                     i += 1
                     continue
                 
@@ -97,49 +105,51 @@ def upload_invoice():
                 if not in_product_section:
                     i+=1
                     continue
-
-                current_product_name = "" # Initialisation pour chaque tentative de produit
+                
+                # On s'assure que product_name_candidate est réinitialisé avant de potentiellement le remplir
+                # (Bien que si un produit est parsé, product_name_buffer est vidé, ce qui vide candidate au prochain tour)
+                # Cette initialisation est cruciale pour éviter UnboundLocalError si les conditions if/elif ne sont pas remplies
+                product_name_candidate = "" # Assurer la définition au début de chaque "tentative"
                 release_date_val = "N/A"
                 quantity_val = None
                 unit_price_val = None
                 lines_processed_for_item = 0
                 
-                # Accumuler le nom du produit si la ligne n'est pas une ligne "Release" et qu'elle n'est pas vide
-                # On le fait ici pour que le buffer soit à jour avant de tester les conditions "Release"
                 if line_stripped and not line_stripped.lower().startswith("release :"):
                      product_name_buffer.append(line_stripped)
                 
-                # Tentative de détection de la fin d'un item produit
-                # Cas 1: La ligne actuelle est "Release : DATE Q P T"
                 match_release_standard = release_line_pattern_re.match(line_stripped)
-                if match_release_standard: # Si la ligne actuelle contient QPT
-                    # Le nom du produit est dans le buffer accumulé JUSTE AVANT cette ligne "Release".
-                    # Donc, on retire la ligne "Release..." elle-même du buffer si elle y a été mise par erreur.
-                    temp_name_buffer = [l for l in product_name_buffer if not release_line_pattern_re.match(l.strip())]
-                    if not temp_name_buffer and product_name_buffer: # Si le buffer ne contenait QUE la ligne Release (improbable mais sécurité)
-                        # Cela signifie que le nom était sur la même ligne que "Release" ou manquant.
-                        # On essaie de prendre ce qui est avant "Release :" sur la ligne actuelle.
-                         name_parts = line_stripped.split("Release :")
-                         if len(name_parts) > 1 and name_parts[0].strip():
-                             product_name_candidate = name_parts[0].strip()
-                         else: # Pas de nom clair
-                             product_name_candidate = "Produit Inconnu (Cas 1 Erreur Nom)"
-                    else:
-                        product_name_candidate = " ".join(temp_name_buffer).strip()
+                if match_release_standard: # Pas besoin de product_name_buffer ici, on le prendra plus tard
+                    # Le nom est ce qui était dans le buffer AVANT cette ligne
+                    temp_buffer_for_name = [l for l in product_name_buffer if not release_line_pattern_re.match(l.strip())]
+                    if temp_buffer_for_name:
+                         product_name_candidate = " ".join(temp_buffer_for_name).strip()
+                    else: # Si le nom était sur la même ligne que "Release :"
+                        name_parts_from_release_line = line_stripped.split("Release :")[0]
+                        if name_parts_from_release_line.strip():
+                             product_name_candidate = name_parts_from_release_line.strip()
+                        # Sinon, on laisse product_name_candidate vide ou on loggue un nom manquant
 
-                    release_date_val = match_release_standard.group(1)
-                    quantity_val = match_release_standard.group(2)
-                    unit_price_val = match_release_standard.group(3)
-                    print(f"DEBUG_PARSING: Cas 1 (Ligne Release avec QPT) - Nom Buffer: '{product_name_candidate}', Ligne: '{line_stripped}'")
-                    lines_processed_for_item = 1 
+                    if product_name_candidate: # On a un nom
+                        release_date_val = match_release_standard.group(1)
+                        quantity_val = match_release_standard.group(2)
+                        unit_price_val = match_release_standard.group(3)
+                        print(f"DEBUG_PARSING: Cas 1 (Ligne Release avec QPT) - Nom: '{product_name_candidate}', Ligne: '{line_stripped}'")
+                        lines_processed_for_item = 1
+                    else:
+                        print(f"DEBUG_PARSING: Cas 1 (Ligne Release avec QPT) mais nom manquant. Ligne: '{line_stripped}' Buffer: {' // '.join(product_name_buffer)}")
+                        # On ne finalise pas de produit, on continue d'accumuler si la ligne suivante est un nom
+                        # ou on vide le buffer si on s'attend à un nouveau produit.
+                        # Pour l'instant, on avance et le buffer sera géré.
+                        product_name_buffer = [] # Vider car cette ligne "Release" n'a pas abouti
                 
-                # Cas 2: Ligne actuelle est "Release : [DATE/vide]", et la SUIVANTE contient les données
                 elif release_line_date_only_or_empty_re.match(line_stripped) and (i + 1 < len(lines)):
                     potential_data_line = lines[i+1].strip()
                     match_alt_data = alt_info_pattern_re.match(potential_data_line)
-                    match_simple_data = simple_qty_price_pattern_re.match(potential_data_line) # Utilisation de la variable
+                    match_simple_data = simple_qty_price_pattern_re.match(potential_data_line)
 
                     if match_alt_data or match_simple_data:
+                        # Le nom est dans product_name_buffer (qui ne devrait pas contenir la ligne "Release :" vide)
                         product_name_candidate = " ".join(product_name_buffer).strip()
                         
                         date_on_release_line = release_line_date_only_or_empty_re.match(line_stripped)
@@ -151,11 +161,9 @@ def upload_invoice():
                             quantity_val = match_alt_data.group(2)
                             unit_price_val = match_alt_data.group(3)
                             if variation and product_name_candidate: product_name_candidate += f" ({variation})"
-                            print(f"DEBUG_PARSING: Cas 2a (Alt Data) - Nom: '{product_name_candidate}', Ligne Release: '{line_stripped}', Ligne Data: '{potential_data_line}'")
                         elif match_simple_data:
                             quantity_val = match_simple_data.group(1)
                             unit_price_val = match_simple_data.group(2)
-                            print(f"DEBUG_PARSING: Cas 2b (Simple Data) - Nom: '{product_name_candidate}', Ligne Release: '{line_stripped}', Ligne Data: '{potential_data_line}'")
                         
                         lines_processed_for_item = 2 
                 
@@ -170,30 +178,22 @@ def upload_invoice():
                         })
                         print(f"  ==> PRODUIT AJOUTÉ: {final_name} (Qté: {quantity_val}, Prix: ${unit_price_val}, Date: {release_date_val})")
                     else:
-                         print(f"DEBUG_PARSING: Nom de produit vide APRES nettoyage final. Lignes approx: '{line_stripped}'" + (f" et '{lines[i+1].strip()}'" if lines_processed_for_item==2 else ""))
+                         print(f"DEBUG_PARSING: Nom produit vide APRES nettoyage final. Lignes approx: '{line_stripped}'" + (f" et '{lines[i+1].strip()}'" if lines_processed_for_item==2 else ""))
                     
                     product_name_buffer = [] 
                     i += lines_processed_for_item 
                     continue 
                 
-                # Si on n'a pas finalisé de produit, on avance.
-                # Le product_name_buffer continue d'accumuler si la ligne n'était pas "Release :" et n'était pas vide.
-                # Si la ligne était "Release :" mais n'a pas mené à un produit, le buffer est vidé juste avant ou
-                # si la ligne était vide après un buffer plein, le buffer est conservé pour le tour suivant.
-                if not line_stripped and not product_name_buffer: # Si ligne vide et buffer vide, on ne fait rien pour le buffer
-                    pass 
-                elif not line_stripped and product_name_buffer: 
+                if not line_stripped and product_name_buffer : 
                     print(f"DEBUG_PARSING: Ligne vide après buffer: {' // '.join(product_name_buffer)}. Buffer conservé.")
-                # Si la ligne n'est pas vide et n'est pas "Release :", elle a déjà été ajoutée au buffer plus haut.
-                # Si la ligne est "Release :" et n'a pas abouti, le buffer a été vidé (ou elle n'a pas été ajoutée).
-
+                
                 i += 1
             
             if product_name_buffer:
                 print(f"DEBUG_PARSING: Contenu final non traité dans product_name_buffer: {' // '.join(product_name_buffer)}")
 
-            if not parsed_products: print("Aucun produit n'a pu être parsé avec la logique actuelle (V6.1).")
-            else: print(f"{len(parsed_products)} produits parsés au total (V6.1).")
+            if not parsed_products: print("Aucun produit n'a pu être parsé (V6.2).")
+            else: print(f"{len(parsed_products)} produits parsés (V6.2).")
             
             shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
             if shipping_match: shipping_cost = shipping_match.group(1); print(f"Frais port (globaux): ${shipping_cost}")
@@ -201,7 +201,7 @@ def upload_invoice():
             if bank_fee_match: bank_fee = bank_fee_match.group(1); print(f"Frais bancaires (globaux): ${bank_fee}")
 
             return jsonify({
-                "message": "Extraction produits (logique affinée V6.1), FDP et frais bancaires.",
+                "message": "Extraction produits (logique affinée V6.2), FDP et frais bancaires.",
                 "filename": file.filename,
                 "shipping_cost_usd": shipping_cost,
                 "bank_transfer_fee_usd": bank_fee,
@@ -217,15 +217,18 @@ def upload_invoice():
     
     return jsonify({"error": "Un problème est survenu avec le fichier ou fichier non traité."}), 500
 
+
 @app.route('/api/get-website-price', methods=['POST'])
 def get_website_price():
-    # ... (Code de cette fonction reste identique à la version précédente que je t'ai donnée) ...
     data = request.get_json()
     product_name_from_invoice = data.get('productName')
     product_url_on_website = data.get('productUrl') 
+
     print(f"DEBUG /api/get-website-price: Reçu productName='{product_name_from_invoice}', productUrl='{product_url_on_website}'")
+
     if not product_url_on_website and not product_name_from_invoice: 
         return jsonify({"error": "Nom du produit ou URL du produit manquant."}), 400
+
     price_str = None; debug_messages = []; target_url = None 
     if product_url_on_website:
         target_url = product_url_on_website
