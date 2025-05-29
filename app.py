@@ -1,11 +1,11 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from PyPDF2 import PdfReader
+from PyPDF2 import PdfReader # Make sure PyPDF2 is in your requirements.txt
 import io
-import re
+import re # For regular expressions
 
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Enable CORS for all routes
 
 @app.route('/')
 def home():
@@ -31,7 +31,7 @@ def upload_invoice():
     
     if file:
         try:
-            print(f"--- Nouveau traitement de PDF : {file.filename} ---") 
+            print(f"--- Nouveau traitement de PDF : {file.filename} ---")
             file_content_in_memory = io.BytesIO(file.read())
             reader = PdfReader(file_content_in_memory)
             
@@ -40,57 +40,84 @@ def upload_invoice():
                 page = reader.pages[page_num]
                 page_text = page.extract_text()
                 if page_text:
-                    full_text += page_text + "\n" 
+                    full_text += page_text + "\n"  # Add a newline between pages for clarity
             
             if not full_text.strip():
                 full_text = "[PyPDF2 n'a pas pu extraire de texte. Le PDF est peut-être une image ou vide.]"
                 print("Avertissement: Texte du PDF vide ou non extractible.")
 
-            # <--- NOUVEAU : Afficher le texte complet dans les logs de Render pour débogage ---
+            # For debugging the full text extraction by the backend:
             print("--- TEXTE COMPLET EXTRAIT DU PDF (pour débogage K-ALBUMS) ---")
-            print(full_text)
-            print("--- FIN TEXTE COMPLET EXTRAIT ---")
-            # <--- FIN NOUVEAU ---
+            # print(full_text) # Uncomment this line if you want to see the ENTIRE PDF text in Render logs (can be very long)
+            print(full_text[:2000]) # Print a larger snippet to Render logs for better context
+            print("--- FIN TEXTE COMPLET EXTRAIT (Snippet de 2000 caractères) ---")
 
             shipping_cost = None
             bank_fee = None
             parsed_products = [] 
             product_name_buffer = []
-            in_product_section = False 
+            in_product_section = False # Flag to know if we are past the first product table header
 
-            shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
-            if shipping_match:
-                shipping_cost = shipping_match.group(1)
-                print(f"Frais de port trouvés: ${shipping_cost}")
+            # Regex for product table header
+            header_pattern_str = r"Product\s+Quantity\s+Price\s+Total"
+            header_pattern_re = re.compile(header_pattern_str, re.IGNORECASE)
 
-            bank_fee_match = re.search(r"Bank transfer fee\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
-            if bank_fee_match:
-                bank_fee = bank_fee_match.group(1)
-                print(f"Frais bancaires trouvés: ${bank_fee}")
+            # Regex for the line containing Release Date, Quantity, Price, Total
+            # Example: Release : 2024-12-093 $14.41 $43.23
+            # Groups:      (Date)        (Qty) (UnitPrice) (LineTotal)
+            release_line_pattern_re = re.compile(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)")
 
             lines = full_text.split('\n')
 
             for line_text in lines:
                 line_stripped = line_text.strip()
+                
+                is_header_line = header_pattern_re.match(line_stripped)
 
-                if not in_product_section and re.match(r"Product\s+Quantity\s+Price\s+Total", line_stripped, re.IGNORECASE):
+                if not in_product_section and is_header_line:
                     in_product_section = True
                     product_name_buffer = [] 
-                    print("DEBUG: En-tête du tableau des produits trouvé. Début de la section produits.")
+                    print("DEBUG: En-tête initial du tableau des produits trouvé et passé.")
                     continue 
 
                 if not in_product_section:
+                    continue # Skip lines until we are in the product section
+
+                if is_header_line: # If we find another header while in product section
+                    print(f"DEBUG: En-tête de tableau répétée ignorée: {line_stripped}")
+                    # If buffer has content, it might be a product name for a line that lacked a "Release..."
+                    # This part is tricky and depends on invoice structure. For now, we clear it
+                    # to avoid it prepending to the *next* product after this repeated header.
+                    if product_name_buffer:
+                         print(f"DEBUG: Buffer vidé à cause d'un en-tête répété. Contenu: {' '.join(product_name_buffer)}")
+                         product_name_buffer = []
                     continue
 
-                release_line_match = re.match(r"Release\s*:\s*(\d{4}-\d{2}-\d{2})\s*(\d+)\s*\$(\d+\.\d+)\s*\$(\d+\.\d+)", line_stripped)
+                release_line_match = release_line_pattern_re.match(line_stripped)
 
                 if release_line_match:
                     if product_name_buffer: 
                         product_name = " ".join(product_name_buffer).strip()
                         
+                        # Clean any residual header pattern from the assembled name (just in case)
+                        product_name = header_pattern_re.sub("", product_name).strip()
+                        
+                        # Further clean "Release : ..." if it somehow got into the name buffer
+                        # This happens if "Release..." is on the same line as the name
+                        # or if the buffer wasn't cleared properly.
+                        # We only want what's BEFORE "Release :" if "Release :" is in the product_name string.
+                        if "Release :" in product_name:
+                             product_name = product_name.split("Release :")[0].strip()
+
+                        if not product_name: # If name became empty after cleaning
+                            print(f"DEBUG: Nom de produit vide après nettoyage pour la ligne 'Release': {line_stripped}. Buffer était: {' '.join(product_name_buffer)}")
+                            product_name_buffer = [] 
+                            continue # Skip this entry
+
                         release_date = release_line_match.group(1)
                         quantity = release_line_match.group(2)
                         unit_price = release_line_match.group(3)
+                        # line_total = release_line_match.group(4) # Available if needed
                         
                         parsed_products.append({
                             "name": product_name,
@@ -99,11 +126,16 @@ def upload_invoice():
                             "release_date": release_date
                         })
                         print(f"Produit trouvé: {product_name} (Qté: {quantity}, Prix: ${unit_price})")
-                        product_name_buffer = [] 
                     else:
-                        print(f"DEBUG: Ligne 'Release' trouvée sans nom de produit dans le buffer: {line_stripped} (Peut arriver si le nom est sur la même ligne ou si le PDF est mal formaté pour cette logique)")
+                        # This case means a "Release..." line was found but no preceding lines were buffered for its name.
+                        # This could happen if the product name is on the SAME line as "Release...",
+                        # or if the PDF structure is very unusual.
+                        print(f"DEBUG: Ligne 'Release' trouvée SANS nom de produit dans le buffer: {line_stripped}. Peut indiquer un nom de produit manquant ou sur la même ligne.")
+                    product_name_buffer = [] # Always reset buffer after processing a "Release" line
                 else:
-                    if line_stripped and not line_stripped.lower() in ["weverse", "upbabyse", "theverse"]:
+                    # If it's not a "Release" line, and not an ignored header, and not empty, add to name buffer
+                    known_parasites = ["weverse", "upbabyse", "theverse"] # Can be expanded
+                    if line_stripped and line_stripped.lower() not in known_parasites:
                         product_name_buffer.append(line_stripped)
             
             if not parsed_products:
@@ -111,14 +143,24 @@ def upload_invoice():
             else:
                 print(f"{len(parsed_products)} produits parsés au total.")
 
+            # Recherche des frais globaux (après le parsing des produits)
+            shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
+            if shipping_match:
+                shipping_cost = shipping_match.group(1)
+                print(f"Frais de port (globaux) trouvés: ${shipping_cost}")
+
+            bank_fee_match = re.search(r"Bank transfer fee\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
+            if bank_fee_match:
+                bank_fee = bank_fee_match.group(1)
+                print(f"Frais bancaires (globaux) trouvés: ${bank_fee}")
+
             return jsonify({
-                "message": "Extraction (multi-lignes noms) des produits, frais de port et frais bancaires.",
+                "message": "Extraction produits (noms multi-lignes affinés), FDP et frais bancaires.",
                 "filename": file.filename,
                 "shipping_cost_usd": shipping_cost,
                 "bank_transfer_fee_usd": bank_fee,
                 "parsed_products": parsed_products,
-                "DEVELOPMENT_full_text_for_debug": full_text, # <--- NOUVEAU : On renvoie le texte complet
-                "extracted_full_text_snippet": full_text[:150] 
+                "DEVELOPMENT_full_text_for_debug": full_text # On renvoie toujours le texte complet pour le moment
             })
 
         except Exception as e:
