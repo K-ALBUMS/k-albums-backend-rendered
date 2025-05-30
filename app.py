@@ -46,113 +46,136 @@ def upload_invoice():
             
             if not full_text.strip():
                 full_text = "[PyPDF2 n'a pas pu extraire de texte. Le PDF est peut-être une image ou vide.]"
-            print("--- TEXTE COMPLET EXTRAIT DU PDF (Backend V11) ---"); print(full_text[:3000]); print("--- FIN TEXTE COMPLET (Snippet) ---")
+                print("Avertissement: Texte du PDF vide ou non extractible.")
 
-            shipping_cost = None; bank_fee = None; parsed_products = [] 
-            lines = full_text.split('\n'); product_name_buffer = []; in_product_section = False
+            print("--- TEXTE COMPLET EXTRAIT DU PDF (Backend V10.1 - Vérification NameError) ---")
+            print(full_text[:3000]) 
+            print("--- FIN TEXTE COMPLET EXTRAIT (Snippet) ---")
 
-            header_re = re.compile(r"^\s*Product\s+Quantity\s+Price\s+Total\s*$", re.IGNORECASE)
-            # Cas 1: Nom sur la ligne + "Release : [DATE] Q P T" OU juste "Release : [DATE] Q P T"
-            name_and_release_data_re = re.compile(
-                r"^(?P<name_on_line>.*?)(?:Release\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})?\s*(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+))$"
+            shipping_cost = None
+            bank_fee = None
+            parsed_products = [] 
+            
+            lines = full_text.split('\n')
+            product_name_buffer = []
+            in_product_section = False
+
+            # Regex - Définitions vérifiées
+            header_pattern_re = re.compile(r"^\s*Product\s+Quantity\s+Price\s+Total\s*$", re.IGNORECASE)
+            release_data_pattern_re = re.compile(
+                r"Release\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})?\s*(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)"
             )
-            # Cas 2: Ligne "Release : [DATE]" ou "Release :" (vide)
-            release_only_re = re.compile(r"Release\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})?\s*$")
-            # Cas 3: Ligne de données Q P T (avec ou sans variation) APRES une ligne "Release :" vide/avec date seule
-            data_after_release_re = re.compile(
+            # Assurez-vous que cette ligne est bien là et correcte
+            release_line_only_re = re.compile(r"Release\s*:\s*(?P<date>\d{4}-\d{2}-\d{2})?\s*$")
+            
+            data_line_after_release_re = re.compile(
                 r"^(?:(?:Size|Ver|Version|Type)\s*:\s*(?P<variation>.*?)\s*)?(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)\s*$", 
                 re.IGNORECASE
             )
 
             i = 0
             while i < len(lines):
-                line = lines[i].strip()
-                product_finalized = False
+                line_stripped = lines[i].strip()
+                product_extracted_this_iteration = False # Flag pour cette itération
 
                 if not in_product_section:
-                    if header_re.match(line): in_product_section = True; product_name_buffer = []; print(f"DEBUG (V11): Entrée section produits: '{line}'")
+                    if header_pattern_re.match(line_stripped):
+                        in_product_section = True; product_name_buffer = []
+                        print(f"DEBUG_PARSING (V10.1): En-tête initial: '{line_stripped}'")
                     i += 1; continue
-                if header_re.match(line):
-                    if product_name_buffer: print(f"DEBUG (V11): Buffer '{'//'.join(product_name_buffer)}' vidé par header.")
-                    product_name_buffer = []; print(f"DEBUG (V11): Header répété ignoré: '{line}'")
+
+                if header_pattern_re.match(line_stripped):
+                    print(f"DEBUG_PARSING (V10.1): En-tête répété ignoré: '{line_stripped}'")
+                    if product_name_buffer: print(f"DEBUG_PARSING (V10.1): Buffer nom '{'//'.join(product_name_buffer)}' perdu (en-tête).")
+                    product_name_buffer = []
                     i += 1; continue
-                if line.lower().startswith("subtotal"):
-                    if product_name_buffer: print(f"DEBUG (V11): Buffer final non traité: {'//'.join(product_name_buffer)}")
-                    product_name_buffer = []; in_product_section = False; print(f"DEBUG (V11): Sortie section (Subtotal): '{line}'"); break
                 
-                # Essayer CAS 1: Nom et Release Data sur la même ligne, OU juste Release Data si buffer a un nom
-                match_name_release = name_and_release_data_re.match(line)
-                if match_name_release:
-                    name_on_line = match_name_release.group("name_on_line").strip()
-                    name_from_buffer = " ".join(product_name_buffer).strip()
+                if line_stripped.lower().startswith("subtotal"):
+                    print(f"DEBUG_PARSING (V10.1): Fin section (Subtotal): '{line_stripped}'")
+                    if product_name_buffer: print(f"DEBUG_PARSING (V10.1): Buffer final non traité: {'//'.join(product_name_buffer)}")
+                    product_name_buffer = []; in_product_section = False; break 
+                
+                if not in_product_section: i += 1; continue
+
+                current_name_str = ""
+                release_date_val = "N/A"
+                quantity_val = None
+                unit_price_val = None
+                lines_consumed_this_turn = 1 # Par défaut on avance d'une ligne
+                
+                match_release_data = release_data_pattern_re.match(line_stripped)
+                # Utilisation de release_line_only_re ici
+                match_release_line_only = release_line_only_re.match(line_stripped)
+
+                if match_release_data:
+                    name_part_on_release_line = line_stripped.split("Release :")[0].strip()
+                    temp_name_from_buffer = " ".join(product_name_buffer).strip()
                     
-                    current_name = name_from_buffer if name_from_buffer else name_on_line
-                    if not current_name and name_on_line : current_name = name_on_line # Si buffer vide mais nom sur ligne release
-
-                    if current_name: # Si on a un nom (soit du buffer, soit de la ligne)
-                        date = match_name_release.group("date") or "N/A"
-                        qty = match_name_release.group("quantity")
-                        price = match_name_release.group("unit_price")
-                        parsed_products.append({"name": current_name, "quantity": int(qty), "unit_price_usd": float(price), "release_date": date})
-                        print(f"  ==> PRODUIT (V11 Cas 1): {current_name} (Q:{qty} P:${price} D:{date})")
-                        product_name_buffer = []
-                        product_finalized = True
-                    else: # Ligne Release avec data mais pas de nom avant
-                        print(f"DEBUG (V11): Ligne Release data SANS NOM: '{line}'")
-                        # On ne l'ajoute pas comme produit, et on ne la met pas dans le buffer nom.
-                        # On va juste l'ignorer et passer à la suivante. product_name_buffer reste tel quel.
-                        # product_name_buffer = [] # Vider au cas où? Non, on veut garder ce qu'il y avait avant.
+                    current_name_str = temp_name_from_buffer
+                    if not current_name_str and name_part_on_release_line and not header_pattern_re.match(name_part_on_release_line):
+                        current_name_str = name_part_on_release_line
+                    
+                    if current_name_str:
+                        release_date_val = match_release_data.group("date") if match_release_data.group("date") else "N/A"
+                        quantity_val = match_release_data.group("quantity")
+                        unit_price_val = match_release_data.group("unit_price")
+                        print(f"DEBUG_PARSING (V10.1): Cas 1 - Nom: '{current_name_str}', Ligne: '{line_stripped}'")
+                    else:
+                        print(f"DEBUG_PARSING (V10.1): Cas 1 (QPT sur ligne Release) mais nom manquant. Ligne: '{line_stripped}' Buffer: {'//'.join(product_name_buffer)}")
+                        if line_stripped: product_name_buffer = [line_stripped] 
+                        else: product_name_buffer = []
                 
-                # Essayer CAS 2: Ligne "Release : [DATE/vide]" (si CAS 1 n'a pas marché)
-                elif release_line_only_re.match(line):
+                elif match_release_line_only: # Utilisation de la variable correctement définie
+                    date_on_this_line = match_release_line_only.group("date") if match_release_line_only.group("date") else "N/A"
                     if (i + 1) < len(lines):
-                        next_line = lines[i+1].strip()
-                        match_data_next = data_after_release_re.match(next_line)
-                        if match_data_next: # La ligne suivante a les données QPT
-                            current_name = " ".join(product_name_buffer).strip()
-                            if current_name:
-                                date_on_rl = release_line_only_re.match(line).group("date") or "N/A"
-                                variation = match_data_next.group("variation")
-                                qty = match_data_next.group("quantity")
-                                price = match_data_next.group("unit_price")
-                                if variation: current_name += f" ({variation.strip()})"
-                                
-                                parsed_products.append({"name": current_name, "quantity": int(qty), "unit_price_usd": float(price), "release_date": date_on_rl})
-                                print(f"  ==> PRODUIT (V11 Cas 2): {current_name} (Q:{qty} P:${price} D:{date_on_rl})")
-                                product_name_buffer = []
-                                i += 1 # On a consommé la ligne suivante aussi
-                                product_finalized = True
-                            else: # Release vide mais pas de nom dans buffer
-                                print(f"DEBUG (V11): Release vide SANS NOM: '{line}', Data: '{next_line}'")
-                                # On ne fait rien, on ne bufferise pas la ligne "Release :" vide
-                        else: # Ligne "Release :" mais la suivante n'est pas une ligne de données
-                            if line: product_name_buffer.append(line) # On ajoute "Release..." au nom potentiel
-                    else: # Fin de fichier après une ligne "Release :"
-                        if line: product_name_buffer.append(line)
-                
-                # Si on n'a pas finalisé de produit, et que la ligne n'est pas une ligne "Release"
-                # (car les cas Release ont été traités), on l'ajoute au buffer si elle n'est pas vide.
-                if not product_finalized and line and not release_line_only_re.match(line) and not name_and_release_data_re.match(line):
-                    product_name_buffer.append(line)
-                elif not product_finalized and not line and product_name_buffer: # Ligne vide après avoir accumulé un nom
-                     print(f"DEBUG_PARSING (V11): Ligne vide après buffer (non finalisé): {' // '.join(product_name_buffer)}")
-                
-                i += 1
-            
-            if product_name_buffer: print(f"DEBUG_PARSING (V11): Buffer final non traité: {'//'.join(product_name_buffer)}")
-            
-            # Nettoyage final des noms (enlever les en-têtes qui auraient pu s'y glisser)
-            final_cleaned_products = []
-            for product in parsed_products:
-                cleaned_name = header_pattern_re.sub("", product["name"]).strip()
-                if cleaned_name: 
-                    product["name"] = cleaned_name
-                    final_cleaned_products.append(product)
-                else: print(f"DEBUG_PARSING (V11): Produit supprimé (nom vide post-nettoyage). Orig: {product['name']}")
-            parsed_products = final_cleaned_products
+                        next_line_stripped = lines[i+1].strip()
+                        match_data_next_line = data_line_after_release_re.match(next_line_stripped)
+                        
+                        if match_data_next_line:
+                            current_name_str = " ".join(product_name_buffer).strip()
+                            if current_name_str:
+                                release_date_val = date_on_this_line
+                                variation = match_data_next_line.group("variation")
+                                quantity_val = match_data_next_line.group("quantity")
+                                unit_price_val = match_data_next_line.group("unit_price")
+                                if variation: current_name_str += f" ({variation.strip()})"
+                                print(f"DEBUG_PARSING (V10.1): Cas 2 - Nom: '{current_name_str}', Release: '{line_stripped}', Data: '{next_line_stripped}'")
+                                lines_consumed_this_turn = 2
+                            else:
+                                print(f"DEBUG_PARSING (V10.1): Cas 2 ignoré (nom vide). Release: '{line_stripped}'")
+                                if line_stripped: product_name_buffer = [line_stripped] 
+                                else: product_name_buffer = []
+                        else: 
+                            if line_stripped: product_name_buffer.append(line_stripped)
+                    else: 
+                         if line_stripped: product_name_buffer.append(line_stripped)
+                else: 
+                    if line_stripped: product_name_buffer.append(line_stripped)
 
-            if not parsed_products: print("Aucun produit n'a pu être parsé (V11).")
-            else: print(f"{len(parsed_products)} produits parsés au total (V11).")
+                if quantity_val is not None and unit_price_val is not None:
+                    final_name = current_name_str 
+                    final_name = header_pattern_re.sub("", final_name).strip()
+                    if "Release :" in final_name: final_name = final_name.split("Release :")[0].strip()
+                    
+                    if final_name:
+                        parsed_products.append({
+                            "name": final_name, "quantity": int(quantity_val),
+                            "unit_price_usd": float(unit_price_val), "release_date": release_date_val
+                        })
+                        print(f"  ==> PRODUIT AJOUTÉ (V10.1): {final_name} (Qté: {quantity_val}, Prix: ${unit_price_val}, Date: {release_date_val})")
+                        product_extracted_this_iteration = True # Marquer qu'on a extrait
+                    else:
+                         print(f"DEBUG_PARSING (V10.1): Nom produit vide APRES nettoyage. Ligne approx: '{lines[i if i < len(lines) else i-1].strip()}'")
+                    
+                    product_name_buffer = [] # TOUJOURS vider le buffer après avoir traité un produit
+                
+                i += lines_consumed_this_turn
+            
+            if product_name_buffer:
+                print(f"DEBUG_PARSING (V10.1): Buffer final non traité: {' // '.join(product_name_buffer)}")
+
+            if not parsed_products: print("Aucun produit n'a pu être parsé (V10.1).")
+            else: print(f"{len(parsed_products)} produits parsés au total (V10.1).")
             
             shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
             if shipping_match: shipping_cost = shipping_match.group(1); print(f"Frais port (globaux): ${shipping_cost}")
@@ -160,22 +183,25 @@ def upload_invoice():
             if bank_fee_match: bank_fee = bank_fee_match.group(1); print(f"Frais bancaires (globaux): ${bank_fee}")
 
             return jsonify({
-                "message": "Extraction produits (logique affinée V11), FDP et frais bancaires.",
+                "message": "Extraction produits (logique affinée V10.1), FDP et frais bancaires.",
                 "filename": file.filename,
                 "shipping_cost_usd": shipping_cost,
                 "bank_transfer_fee_usd": bank_fee,
                 "parsed_products": parsed_products,
                 "DEVELOPMENT_full_text_for_debug": full_text 
             })
+
         except Exception as e:
             print(f"Erreur critique lors du traitement du PDF : {e}")
             import traceback
             traceback.print_exc() 
             return jsonify({"error": f"Erreur interne majeure lors du traitement du PDF: {str(e)}"}), 500
+    
     return jsonify({"error": "Un problème est survenu avec le fichier ou fichier non traité."}), 500
 
 @app.route('/api/get-website-price', methods=['POST'])
 def get_website_price():
+    # ... (Code de cette fonction reste identique à la version précédente) ...
     data = request.get_json()
     product_name_from_invoice = data.get('productName')
     product_url_on_website = data.get('productUrl') 
