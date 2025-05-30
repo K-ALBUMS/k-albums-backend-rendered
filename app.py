@@ -19,23 +19,19 @@ def upload_invoice():
         file_content_in_memory = io.BytesIO(file.read())
         reader = PdfReader(file_content_in_memory)
         full_text = "".join([page.extract_text() + "\n" for page in reader.pages if page.extract_text()])
-
-        # Pour debug si besoin
-        # print("--- TEXTE PDF ---\n", full_text[:1500], "\n--- FIN PDF ---")
-
         lines = [l.strip() for l in full_text.split('\n') if l.strip()]
         parsed_products = []
 
-        # Expression pour détecter un produit (avec Release, quantité, prix, total)
+        # REGEX TOLÉRANTE pour toutes tes lignes (date absente ou 2024/2024-12/2024-12-09)
         product_re = re.compile(
-            r'^(?P<name>.+?)Release\s*:\s*(?P<date>\d{4}-\d{2}-\d{2}|\d{4}-\d{2}|\d{4})?\s*(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)$'
+            r'^(?P<name>.+?)Release\s*:\s*(?P<date>\d{4}(?:-\d{2})?(?:-\d{2})?)?\s*(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)$'
         )
-        # Accessoire avec variation "Size:" séparé
         size_line_re = re.compile(r'^(Size|Ver|Version|Type)\s*:\s*(?P<variation>.+)$', re.IGNORECASE)
 
         i = 0
         while i < len(lines):
             line = lines[i]
+
             # Cas général : produit tout sur la même ligne (albums, lightsticks, etc.)
             match = product_re.match(line)
             if match:
@@ -43,11 +39,11 @@ def upload_invoice():
                 date = match.group("date") or "N/A"
                 quantity = int(match.group("quantity"))
                 unit_price = float(match.group("unit_price"))
-                # Gérer variation si nom fini par ) et ligne suivante commence par Size:
+                # Ajout d'une variation éventuelle sur la ligne suivante
                 if (i + 1 < len(lines)) and size_line_re.match(lines[i + 1]):
                     variation = size_line_re.match(lines[i + 1]).group("variation").strip()
-                    name = f"{name}({variation})"
-                    i += 1  # On saute la ligne variation
+                    name = f"{name} ({variation})"
+                    i += 1  # skip la ligne variation
                 parsed_products.append({
                     "name": name,
                     "quantity": quantity,
@@ -57,31 +53,9 @@ def upload_invoice():
                 i += 1
                 continue
 
-            # Cas accessoire ou produit avec variation sur plusieurs lignes
-            # ex: nom + Release: (vide) + Size + quantité/prix
-            if (i + 2 < len(lines)) and 'Release' in lines[i + 1] and size_line_re.match(lines[i + 2]):
-                name = line
-                date = re.search(r'Release\s*:\s*(?P<date>\d{4}-\d{2}-\d{2}|\d{4}-\d{2}|\d{4})?', lines[i + 1])
-                date_val = date.group("date") if date else "N/A"
-                variation = size_line_re.match(lines[i + 2]).group("variation").strip()
-                # La ligne après Size contient les quantités/prix
-                if (i + 3 < len(lines)) and re.match(r'^\d+\s*\$\d+\.\d+\s*\$\d+\.\d+$', lines[i + 3]):
-                    qty_line = lines[i + 3]
-                    q_match = re.match(r'^(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)$', qty_line)
-                    if q_match:
-                        parsed_products.append({
-                            "name": f"{name} ({variation})",
-                            "quantity": int(q_match.group("quantity")),
-                            "unit_price_usd": float(q_match.group("unit_price")),
-                            "release_date": date_val
-                        })
-                        i += 4
-                        continue
-
-            # Si ce n'est pas un produit, passer à la ligne suivante
             i += 1
 
-        # Frais d'envoi
+        # Frais d'envoi et bancaires
         shipping_cost = None
         bank_fee = None
         shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
@@ -92,7 +66,7 @@ def upload_invoice():
             bank_fee = bank_fee_match.group(1)
 
         return jsonify({
-            "message": "Extraction produits (robuste, séparé ligne par ligne)",
+            "message": "Extraction produits (robuste, regex tolérante, spécial facture coréenne)",
             "filename": file.filename,
             "shipping_cost_usd": shipping_cost,
             "bank_transfer_fee_usd": bank_fee,
