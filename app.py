@@ -22,38 +22,59 @@ def upload_invoice():
         lines = [l.strip() for l in full_text.split('\n') if l.strip()]
         parsed_products = []
 
-        # REGEX TOLÉRANTE pour toutes tes lignes (date absente ou 2024/2024-12/2024-12-09)
-        product_re = re.compile(
-            r'^(?P<name>.+?)Release\s*:\s*(?P<date>\d{4}(?:-\d{2})?(?:-\d{2})?)?\s*(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)$'
-        )
-        size_line_re = re.compile(r'^(Size|Ver|Version|Type)\s*:\s*(?P<variation>.+)$', re.IGNORECASE)
-
+        # On parcourt deux lignes à la fois : (nom du produit, puis "Release : ..." avec quantité/prix)
         i = 0
-        while i < len(lines):
-            line = lines[i]
+        while i < len(lines) - 1:
+            name_line = lines[i]
+            details_line = lines[i + 1]
 
-            # Cas général : produit tout sur la même ligne (albums, lightsticks, etc.)
-            match = product_re.match(line)
+            # REGEX : repère "Release :" + date (optionnelle) + quantité + prix + total
+            match = re.match(
+                r'^Release\s*:\s*(?P<date>\d{4}(?:-\d{2})?(?:-\d{2})?)?\s*(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)$',
+                details_line
+            )
+
             if match:
-                name = match.group("name").strip()
+                name = name_line.strip()
                 date = match.group("date") or "N/A"
                 quantity = int(match.group("quantity"))
                 unit_price = float(match.group("unit_price"))
-                # Ajout d'une variation éventuelle sur la ligne suivante
-                if (i + 1 < len(lines)) and size_line_re.match(lines[i + 1]):
-                    variation = size_line_re.match(lines[i + 1]).group("variation").strip()
-                    name = f"{name} ({variation})"
-                    i += 1  # skip la ligne variation
                 parsed_products.append({
                     "name": name,
                     "quantity": quantity,
                     "unit_price_usd": unit_price,
                     "release_date": date
                 })
-                i += 1
+                i += 2
                 continue
 
-            i += 1
+            # Cas accessoire sur 3 lignes : nom, "Release :", "Size: ... quantité/prix"
+            match_size = (
+                details_line.lower().startswith("release")
+                and i + 2 < len(lines)
+                and re.match(r'^(Size|Ver|Version|Type)\s*:\s*(?P<variation>.+)\d+\s*\$\d+\.\d+\s*\$\d+\.\d+$', lines[i + 2], re.IGNORECASE)
+            )
+            if match_size:
+                name = name_line.strip()
+                size_line = lines[i + 2]
+                size_match = re.match(
+                    r'^(Size|Ver|Version|Type)\s*:\s*(?P<variation>.+?)(?P<quantity>\d+)\s*\$(?P<unit_price>\d+\.\d+)\s*\$(?P<total_price>\d+\.\d+)$',
+                    size_line, re.IGNORECASE
+                )
+                if size_match:
+                    variation = size_match.group("variation").strip()
+                    quantity = int(size_match.group("quantity"))
+                    unit_price = float(size_match.group("unit_price"))
+                    parsed_products.append({
+                        "name": f"{name} ({variation})",
+                        "quantity": quantity,
+                        "unit_price_usd": unit_price,
+                        "release_date": "N/A"
+                    })
+                    i += 3
+                    continue
+
+            i += 1  # Sinon passe à la ligne suivante
 
         # Frais d'envoi et bancaires
         shipping_cost = None
@@ -66,7 +87,7 @@ def upload_invoice():
             bank_fee = bank_fee_match.group(1)
 
         return jsonify({
-            "message": "Extraction produits (robuste, regex tolérante, spécial facture coréenne)",
+            "message": "Extraction produits (OK format 2 lignes : nom puis Release/quantité/prix)",
             "filename": file.filename,
             "shipping_cost_usd": shipping_cost,
             "bank_transfer_fee_usd": bank_fee,
