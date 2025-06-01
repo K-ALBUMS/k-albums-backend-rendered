@@ -1,6 +1,6 @@
 Flask
-gunicorn
 Flask-CORS
+pdfplumber
 requests
 beautifulsoup4
-pdfplumber
+gunicorn
