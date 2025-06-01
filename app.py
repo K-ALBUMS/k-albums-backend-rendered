@@ -1,65 +1,54 @@
+# app.py
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pdfplumber
 import re
 
+app = Flask(__name__)
+CORS(app)
+
+# Exemple de route de test
+@app.route("/ping")
+def ping():
+    return jsonify({"message": "pong"})
+
+# Ici, par exemple, votre logique pour parser une facture
 def get_full_text_lines(file_path):
-    """
-    Ouvre le PDF avec pdfplumber, extrait tout le texte page par page,
-    puis renvoie une liste de lignes (déjà strip()).
-    """
     with pdfplumber.open(file_path) as pdf:
-        all_text = []
+        lines = []
         for page in pdf.pages:
             text = page.extract_text()
             if text:
                 for line in text.split("\n"):
                     cleaned = line.strip()
                     if cleaned:
-                        all_text.append(cleaned)
-    return all_text
+                        lines.append(cleaned)
+    return lines
 
 def parse_products_from_lines(lines_list):
-    """
-    Analyse une liste de lignes extraites d'un PDF (pdfplumber) et retourne
-    une liste de produits sous forme de dicts :
-      - name            : string
-      - release_date    : string ("YYYY-MM-DD", "YYYY-MM", "YYYY" ou "N/A")
-      - quantity        : int
-      - unit_price_usd  : float
-
-    lines_list doit déjà être "strip()"ée (pas de \n en fin de ligne).
-    On part du principe que la section produits commence dès qu'on trouve
-    l'en-tête "Product Quantity Price Total" et s'arrête à "Subtotal".
-    """
-
     products = []
     i = 0
     n = len(lines_list)
 
-    # 1. Repérer le début de la section produits
+    # Trouver le début de la section "Product Quantity Price Total"
     while i < n and "Product Quantity Price Total" not in lines_list[i]:
         i += 1
-
-    # Si on n'a pas trouvé l'en-tête, on renvoie liste vide
     if i >= n:
         return []
 
-    # Passer la ligne d'en-tête
-    i += 1
+    i += 1  # passer l'en‐tête
 
-    # 2. Parcourir jusqu'à "Subtotal"
+    date_pattern = re.compile(r"(\d{4}(?:-\d{2}(?:-\d{2})?)?)")
+    qty_price_pattern = re.compile(r"(\d+)\s*\$?([\d.,]+)")
+
     def is_subtotal_line(line):
         return line.strip().startswith("Subtotal")
 
-    # Regex pour extraire date (YYYY, YYYY-MM ou YYYY-MM-DD)
-    date_pattern = re.compile(r"(\d{4}(?:-\d{2}(?:-\d{2})?)?)")
-
-    # Regex pour extraire quantité + prix unitaire (ex : "2 $39.85" ou "10 $6.78")
-    qty_price_pattern = re.compile(r"(\d+)\s*\$?([\d.,]+)")
-
     while i < n and not is_subtotal_line(lines_list[i]):
-        # 2.1. Accumuler le nom du produit jusqu'à la ligne commençant par "Release"
         name_lines = []
-        while i < n and not lines_list[i].strip().startswith("Release"):
+        # Accumuler le nom jusqu'à "Release"
+        while i < n and not lines_list[i].startswith("Release"):
             text = lines_list[i].strip()
             if text and not text.startswith("Product Quantity Price Total"):
                 name_lines.append(text)
@@ -68,20 +57,15 @@ def parse_products_from_lines(lines_list):
         if i >= n:
             break
 
-        # On est sur une ligne "Release : ..."
-        release_line = lines_list[i].strip()
-        i += 1  # on passera à la ligne suivante pour récupérer quantité/prix si besoin
-
         full_name = " ".join(name_lines).strip()
+        release_line = lines_list[i].strip()
+        i += 1
 
-        # 2.2. Extraire la date au sein de la ligne "Release :"
         release_date = "N/A"
-        quantity = None
-        unit_price = None
+        quantity = 0
+        unit_price = 0.0
 
         after_release = release_line[len("Release :"):].strip()
-
-        # 2.2.1. Chercher une date valide
         date_match = date_pattern.match(after_release)
         if date_match:
             release_date = date_match.group(1)
@@ -89,38 +73,19 @@ def parse_products_from_lines(lines_list):
         else:
             rest = after_release
 
-        # 2.2.2. Tenter d'extraire quantité + prix sur la même ligne
         same_line_match = qty_price_pattern.search(rest)
         if same_line_match:
             quantity = int(same_line_match.group(1))
             unit_price = float(same_line_match.group(2).replace(",", "."))
         else:
-            # 2.2.3. Sinon, regarder la ligne suivante pour qty/prix
+            # Chercher qty/prix sur la ligne suivante
             if i < n:
                 next_line = lines_list[i].strip()
-                if next_line.startswith("Release"):
-                    i += 1
-                    if i < n:
-                        next_line = lines_list[i].strip()
-                    else:
-                        next_line = ""
                 qty_price_match = qty_price_pattern.search(next_line)
                 if qty_price_match:
                     quantity = int(qty_price_match.group(1))
                     unit_price = float(qty_price_match.group(2).replace(",", "."))
                     i += 1
-                else:
-                    qty_price_match2 = qty_price_pattern.search(next_line)
-                    if qty_price_match2:
-                        quantity = int(qty_price_match2.group(1))
-                        unit_price = float(qty_price_match2.group(2).replace(",", "."))
-                        i += 1
-
-        # Valeurs par défaut si non trouvées
-        if quantity is None:
-            quantity = 0
-        if unit_price is None:
-            unit_price = 0.0
 
         products.append({
             "name": full_name,
@@ -131,15 +96,42 @@ def parse_products_from_lines(lines_list):
 
     return products
 
+# Exemple d'endpoint pour uploader un PDF et récupérer les produits
+@app.route("/api/upload-invoice", methods=["POST"])
+def upload_invoice():
+    """
+    Attendre un champ 'invoice_pdf' dans form-data.
+    Retourne JSON contenant parsed_products, shipping_cost_usd, bank_transfer_fee_usd, etc.
+    """
+    if "invoice_pdf" not in request.files:
+        return jsonify({"error": "Aucun fichier PDF fourni"}), 400
+
+    f = request.files["invoice_pdf"]
+    temp_path = "/tmp/" + f.filename
+    f.save(temp_path)
+
+    # Récupérer le texte ligne par ligne
+    lines = get_full_text_lines(temp_path)
+
+    # Extraire shipping fee et bank fee brut
+    full_text = "\n".join(lines)
+    shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
+    bank_fee_match = re.search(r"Bank transfer fee\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
+
+    shipping_fee = float(shipping_match.group(1)) if shipping_match else 0.0
+    bank_fee = float(bank_fee_match.group(1)) if bank_fee_match else 0.0
+
+    # Extraire les produits
+    parsed_products = parse_products_from_lines(lines)
+
+    return jsonify({
+        "filename": f.filename,
+        "shipping_cost_usd": shipping_fee,
+        "bank_transfer_fee_usd": bank_fee,
+        "parsed_products": parsed_products,
+        "message": "OK"
+    })
+
+# Pour lancer en local avec python app.py
 if __name__ == "__main__":
-    invoice_pdf_path = "invoice-46584.pdf"  # Remplacez par votre chemin de fichier
-    lines = get_full_text_lines(invoice_pdf_path)
-    produits = parse_products_from_lines(lines)
-
-    for idx, prod in enumerate(produits, 1):
-        print(f"{idx:02d}. {prod['name']}")
-        print(f"     → Date   : {prod['release_date']}")
-        print(f"     → Quantité : {prod['quantity']}")
-        print(f"     → Prix U.  : {prod['unit_price_usd']} USD\n")
-
-    print(f"Nombre total de produits extraits : {len(produits)}")
+    app.run(host="0.0.0.0", port=5000)
