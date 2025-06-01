@@ -35,9 +35,9 @@ def get_full_text_lines(file_path):
 # -------------------------------------------------------------
 def parse_products_from_lines(lines_list):
     """
-    Parcourt lines_list (chaque élément est une ligne extraite du PDF),
+    Parcourt lines_list (liste des lignes extraites du PDF),
     trouve la section "Product Quantity Price Total", l’analyse jusqu’à "Subtotal",
-    et retourne une liste de dict {"name", "quantity", "unit_price_usd", "release_date"}.
+    et retourne une liste de dicts {"name", "quantity", "unit_price_usd", "release_date"}.
     """
 
     products = []
@@ -50,7 +50,7 @@ def parse_products_from_lines(lines_list):
     if i >= n:
         return []
 
-    # Passer la ligne d'en‐tête
+    # Passer la ligne d'en-tête
     i += 1
 
     # Patterns regex
@@ -62,10 +62,11 @@ def parse_products_from_lines(lines_list):
 
     # 2) Parcourir jusqu'à "Subtotal"
     while i < n and not is_subtotal_line(lines_list[i]):
-        # Accumuler le nom du produit (potentiellement multi‐lignes)
+        # 2.a) Accumuler le nom du produit (potentiellement multi-lignes)
         name_lines = []
         while i < n and not lines_list[i].startswith("Release"):
             text = lines_list[i].strip()
+            # On ignore les en-têtes redondants s’ils réapparaissent
             if text and not text.startswith("Product Quantity Price Total"):
                 name_lines.append(text)
             i += 1
@@ -84,28 +85,42 @@ def parse_products_from_lines(lines_list):
 
         # Extrait la partie après "Release :"
         after_release = release_line[len("Release :"):].strip()
+        # 1) Essayer de capturer une date (YYYY ou YYYY-MM ou YYYY-MM-DD)
         date_match = date_pattern.match(after_release)
         if date_match:
             release_date = date_match.group(1)
             rest = after_release[date_match.end():].strip()
         else:
-            rest = after_release
+            rest = after_release  # pas de date exacte trouvée
 
-        # On cherche quantité + prix unitaire sur la même ligne
+        # 2) Chercher quantité + prix unitaire sur la même ligne
         same_line_match = qty_price_pattern.search(rest)
         if same_line_match:
-            quantity = int(same_line_match.group(1))
-            # Remplacer la virgule par point s’il y en a
-            unit_price = float(same_line_match.group(2).replace(",", "."))
+            try:
+                quantity = int(same_line_match.group(1))
+            except ValueError:
+                quantity = 0
+            price_str = same_line_match.group(2).replace(",", ".")
+            try:
+                unit_price = float(price_str) if price_str and price_str != "." else 0.0
+            except ValueError:
+                unit_price = 0.0
         else:
-            # Sinon, chercher sur la ligne suivante
+            # 3) Sinon, regarder la ligne suivante pour qty + prix
             if i < n:
                 next_line = lines_list[i].strip()
                 qty_price_match = qty_price_pattern.search(next_line)
                 if qty_price_match:
-                    quantity = int(qty_price_match.group(1))
-                    unit_price = float(qty_price_match.group(2).replace(",", "."))
-                    i += 1  # Consommer cette ligne aussi
+                    try:
+                        quantity = int(qty_price_match.group(1))
+                    except ValueError:
+                        quantity = 0
+                    price_str = qty_price_match.group(2).replace(",", ".")
+                    try:
+                        unit_price = float(price_str) if price_str and price_str != "." else 0.0
+                    except ValueError:
+                        unit_price = 0.0
+                    i += 1  # on consomme cette ligne aussi
 
         products.append({
             "name": full_name,
@@ -143,8 +158,14 @@ def upload_invoice():
         shipping_match = re.search(r"Shipping\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
         bank_fee_match = re.search(r"Bank transfer fee\s*\$?\s*(\d+\.?\d*)", full_text, re.IGNORECASE)
 
-        shipping_fee = float(shipping_match.group(1)) if shipping_match else 0.0
-        bank_fee = float(bank_fee_match.group(1)) if bank_fee_match else 0.0
+        try:
+            shipping_fee = float(shipping_match.group(1)) if shipping_match else 0.0
+        except ValueError:
+            shipping_fee = 0.0
+        try:
+            bank_fee = float(bank_fee_match.group(1)) if bank_fee_match else 0.0
+        except ValueError:
+            bank_fee = 0.0
 
         # 5) Extraire la liste des produits
         parsed_products = parse_products_from_lines(lines)
